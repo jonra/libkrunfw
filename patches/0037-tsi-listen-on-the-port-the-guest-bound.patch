@@ -1,0 +1,45 @@
+From: Jon Rasmussen
+Subject: [PATCH] tsi: listen on the port the guest bound
+
+A bind() to port 0 lets the guest stack pick an ephemeral port, and
+getsockname() reports that port. tsi_bind() stored the address as the
+caller passed it, with port 0, so TSI_LISTEN asked the host for port 0
+and the host picked a different free port. A connect() to the port the
+guest reported then reached nothing on the host and failed with ENODATA
+("No data available"). This breaks every server that binds port 0, such
+as test servers (JDK HttpServer, Spring Boot random port).
+
+Keep the port the guest stack assigned in bound_addr, so the host
+listens on the same port.
+
+---
+--- a/net/tsi/af_tsi.c
++++ b/net/tsi/af_tsi.c
+@@ -251,6 +251,27 @@
+ 	}
+ 	memcpy(tsk->bound_addr, addr, addr_len);
+ 
++	/*
++	 * A bind to port 0 lets the guest stack pick an ephemeral port, and
++	 * getsockname() reports that port. Keep it in bound_addr, so the host
++	 * listens on the same port instead of picking its own: otherwise a
++	 * connect to the reported port reaches nothing on the host.
++	 */
++	if (tsk->family == PF_INET || tsk->family == PF_INET6) {
++		struct sockaddr_storage actual;
++		int len;
++
++		len = isocket->ops->getname(isocket, (struct sockaddr *)&actual, 0);
++		if (len > 0 && tsk->family == PF_INET &&
++		    addr_len >= sizeof(struct sockaddr_in))
++			((struct sockaddr_in *)tsk->bound_addr)->sin_port =
++				((struct sockaddr_in *)&actual)->sin_port;
++		else if (len > 0 && tsk->family == PF_INET6 &&
++			 addr_len >= sizeof(struct sockaddr_in6))
++			((struct sockaddr_in6 *)tsk->bound_addr)->sin6_port =
++				((struct sockaddr_in6 *)&actual)->sin6_port;
++	}
++
+ release:
+ 	release_sock(sk);
+ 	return err;
